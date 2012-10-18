@@ -565,6 +565,9 @@ class Server:
         buddy = self.search_buddy_list(node.getFrom().getStripped().encode("utf-8"), by='jid')
         if not buddy:
             buddy = self.add_buddy(jid=node.getFrom())
+        # TODO handle MUC presence
+        if isinstance(buddy, MUC):
+            return
         action='update'
         node_type = node.getType()
         if node_type in ["error", "unavailable"]:
@@ -603,25 +606,34 @@ class Server:
         """ Receive message. """
         self.print_debug_handler("message", node)
         node_type = node.getType()
-        if node_type not in ["message", "chat", None]:
+        if node_type not in ["message", "chat", "groupchat", None]:
             self.print_error("unknown message type: '%s'" % node_type)
             return
         jid = node.getFrom()
         body = node.getBody()
+        if node_type == "groupchat":
+            chatname = node.getFrom().getStripped()
+            resource = node.getFrom().getResource()
+            buddy = self.search_buddy_list(chatname, by='jid')
+        else:
+            buddy = self.search_buddy_list(self.stringify_jid(jid), by='jid')
         if not jid or not body:
             return
-        buddy = self.search_buddy_list(self.stringify_jid(jid), by='jid')
         if not buddy:
             buddy = self.add_buddy(jid=jid)
         # If a chat buffer exists for the buddy, receive the message with that
         # buffer even if private is off. The buffer may have been created with
         # /jchat.
         recv_object = self
-        if not buddy.chat and weechat.config_boolean(self.options['private']):
-            self.add_chat(buddy)
-        if buddy.chat:
+        if isinstance(buddy, Buddy):
+            if not buddy.chat and weechat.config_boolean(self.options['private']):
+                self.add_chat(buddy)
+            if buddy.chat:
+                recv_object = buddy.chat
+            recv_object.recv_message(buddy, body.encode("utf-8"))
+        elif isinstance(buddy, MUC):
             recv_object = buddy.chat
-        recv_object.recv_message(buddy, body.encode("utf-8"))
+            recv_object.recv_muc_message(buddy, resource.encode("utf-8"), body.encode("utf-8"))
 
     def recv(self):
         """ Receive something from Jabber server. """
@@ -661,16 +673,21 @@ class Server:
         The buddy argument can be either a jid string,
         eg username@domain.tld/resource or a Buddy object instance.
         """
-        recipient = buddy
-        if isinstance(buddy, Buddy):
-            recipient = buddy.jid
         if not self.ping_up:
             weechat.prnt(self.buffer, "%sjabber: unable to send message, connection is down"
                          % weechat.prefix("error"))
             return
-        if self.client:
-            msg = xmpp.protocol.Message(to=recipient, body=message, typ='chat')
-            self.client.send(msg)
+        recipient = buddy
+        if isinstance(buddy, Buddy):
+            recipient = buddy.jid
+            if self.client:
+                msg = xmpp.protocol.Message(to=recipient, body=message, typ='chat')
+                self.client.send(msg)
+        elif isinstance(buddy, MUC):
+            recipient = buddy.jid
+            if self.client:
+               msg = xmpp.protocol.Message(to=recipient, body=message, typ="groupchat")
+               self.client.send(msg)
 
     def send_message_from_input(self, input=''):
         """ Send a message from input text on server buffer. """
@@ -730,6 +747,17 @@ class Server:
         buddy.resource = buddy.resource.encode("utf-8")
         self.buddies.append(buddy)
         return buddy
+
+    def add_muc(self, room, nickname):
+        """ Add a new buddy """
+        muc = MUC(jid=room, server=self)
+        resource = "%s/%s" % (room, nickname)
+        xmpp_room = xmpp.protocol.JID(resource)
+        pres = xmpp.Presence(to=xmpp_room)
+        self.client.send(pres)
+        muc.resource = muc.resource.encode("utf-8")
+        self.buddies.append(muc)
+        return muc
 
     def display_buddies(self):
         """ Display buddies. """
@@ -1010,6 +1038,13 @@ class Chat:
                                              buddy.alias,
                                              message))
 
+    def recv_muc_message(self, buddy, nickname, message):
+        """ Receive a message from MUC. """
+        weechat.prnt_date_tags(self.buffer, 0, "notify_message",
+                               "%s%s\t%s" % (weechat.color("chat_nick_other"),
+                                             nickname,
+                                             message))
+
     def send_message(self, message):
         """ Send message to buddy. """
         if not self.server.ping_up:
@@ -1017,9 +1052,11 @@ class Chat:
                          % weechat.prefix("error"))
             return
         self.server.send_message(self.buddy, message)
-        weechat.prnt(self.buffer, "%s%s\t%s" % (weechat.color("chat_nick_self"),
-                                                   self.server.buddy.alias,
-                                                   message))
+		# On a MUC we will receive our messages
+        if not isinstance(self.buddy, MUC):
+            weechat.prnt(self.buffer, "%s%s\t%s" % (weechat.color("chat_nick_self"),
+                                                       self.server.buddy.alias,
+                                                       message))
     def print_status(self, status):
         ''' Print a status message in chat '''
         weechat.prnt(self.buffer, "%s%s has status %s" % (\
@@ -1038,6 +1075,68 @@ class Chat:
         self.close_buffer()
 
 # =================================[ buddies ]==================================
+
+
+class MUC:
+    """ Class to manage XMPP MUC. """
+    def __init__(self, jid=None, chat=None, server=None):
+        """ Init MUC
+
+        Args:
+            jid: xmpp.protocol.JID instance or string
+            chat: Chat object instance
+            server: Server object instance
+        """
+        self.jid = xmpp.protocol.JID(jid=jid)
+        self.chat = chat
+        self.server = server
+        self.bare_jid = ''
+        self.username = ''
+        self.name = ''
+        self.domain = ''
+        self.resource = ''
+        self.alias = ''
+        self.parse_jid()
+        self.set_alias()
+
+    def set_alias(self):
+        """Set the buddy alias.
+
+        If an alias is defined in jabber_jid_aliases, it is used. Otherwise the
+        alias is set to self.bare_jid or self.name if it exists.
+        """
+        self.alias = self.bare_jid
+        if not self.bare_jid:
+            self.alias = ''
+        if self.name:
+            self.alias = self.name
+        global jabber_jid_aliases
+        for alias, jid in jabber_jid_aliases.items():
+            if jid == self.bare_jid:
+                self.alias = alias
+                break
+        return
+
+    def parse_jid(self):
+        """Parse the jid property.
+
+        The table shows how the jid is parsed and which properties are updated.
+
+            Property        Value
+            jid             room@mydomain.tld
+
+            bare_jid        myuser@mydomain.tld
+            username        myuser
+            domain          mydomain.tld
+            resource        myresource
+        """
+        if not self.jid:
+            return
+        self.bare_jid = self.jid.getStripped().encode("utf-8")
+        self.username = self.jid.getNode()
+        self.domain = self.jid.getDomain()
+        self.resource = self.jid.getResource()
+        return
 
 class Buddy:
     """ Class to manage buddies. """
@@ -1209,6 +1308,11 @@ def jabber_hook_commands_and_completions():
                          "buddy: buddy id",
                          "",
                          "jabber_cmd_jchat", "")
+    weechat.hook_command("jroom", "Manage XMPP rooms",
+                         "<room>",
+                         "room: MUC jid",
+                         "",
+                         "jabber_cmd_room", "")
     weechat.hook_command("jmsg", "Send a messge to a buddy",
                          "[-server <server>] <buddy> <text>",
                          "server: name of jabber server buddy is on\n"
@@ -1393,6 +1497,26 @@ def jabber_cmd_jchat(data, buffer, args):
             buddy = context["server"].search_buddy_list(args, by='alias')
             if not buddy:
                 buddy = context["server"].add_buddy(jid=args)
+            if not buddy.chat:
+                context["server"].add_chat(buddy)
+            weechat.buffer_set(buddy.chat.buffer, "display", "auto")
+    return weechat.WEECHAT_RC_OK
+
+def jabber_cmd_room(data, buffer, args):
+    """ Command '/jroom'. """
+    if args:
+        argv = args.split()
+        room = argv[0]
+        if len(argv) == 1:
+            nickname = "weechat" #TODO add a config parameter for default nickname
+        else:
+            nickname = argv[1]
+
+        context = jabber_search_context(buffer)
+        if context["server"]:
+            buddy = context["server"].search_buddy_list(args, by='alias')
+            if not buddy:
+                buddy = context["server"].add_muc(room, nickname)
             if not buddy.chat:
                 context["server"].add_chat(buddy)
             weechat.buffer_set(buddy.chat.buffer, "display", "auto")
