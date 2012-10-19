@@ -1065,8 +1065,10 @@ class Chat:
 
     def recv_muc_message(self, buddy, nickname, message):
         """ Receive a message from MUC. """
+        ptr_nick_gui = weechat.nicklist_search_nick(self.buffer, "", nickname)
+        color = weechat.nicklist_nick_get_string(self.buffer, nickname, "color")
         weechat.prnt_date_tags(self.buffer, 0, "notify_message",
-                               "%s%s\t%s" % (weechat.color("chat_nick_other"),
+                               "%s%s\t%s" % (weechat.color(color),
                                              nickname,
                                              message))
 
