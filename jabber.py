@@ -567,6 +567,7 @@ class Server:
             chan_user = muc.add_buddy(jid=node.getFrom())
 
         node_type = node.getType()
+        role = node.getRole()
         if node_type in ["error", "unavailable"]:
             nick = node.getNick()
             code = node.getStatusCode()
@@ -578,7 +579,7 @@ class Server:
             else:
                 action='remove'
 
-        muc.update_nicklist(buddy=chan_user, action=action)
+        muc.update_nicklist(buddy=chan_user, action=action, role=role)
 
     def presence_handler(self, conn, node):
         self.print_debug_handler("presence", node)
@@ -602,6 +603,7 @@ class Server:
                 if name:
                     buddy.set_name(name.encode("utf-8"))
             buddy.set_status(status=status, away=away)
+
         self.update_nicklist(buddy=buddy, action=action)
         return
 
@@ -1250,7 +1252,7 @@ class MUC:
                         buddy.resource)
         weechat.prnt(self.chat.buffer, msg)
 
-    def update_nicklist(self, buddy=None, action=None):
+    def update_nicklist(self, buddy=None, action=None, role=None):
         """Update buddy in nicklist
             Args:
                 buddy: Buddy object instance
@@ -1266,9 +1268,14 @@ class MUC:
         prefix = ''
         color = ''
         if action == 'update':
+            prefix = ""
+            role_color = ""
+            if role == "moderator":
+                prefix = "⚑ "
+                role_color = "red"
             nick_color = "bar_fg"
             weechat.nicklist_add_nick(self.chat.buffer, "", buddy.resource,
-                                      nick_color, "", "", 1)
+                                      nick_color, prefix, role_color, 1)
             if not ptr_nick_gui:
                 msg = 'joined'
                 prefix = 'join'
