@@ -560,14 +560,34 @@ class Server:
         if jabber_debug_enabled():
             weechat.prnt(self.buffer, "%sjabber: %s" % (weechat.prefix("error"), message))
 
+    def muc_presence(self, muc, conn, node):
+        chan_user = muc.search_buddy_list(node.getFrom().getResource().encode("utf-8"), by='name')
+        action='update'
+        if not chan_user:
+            chan_user = muc.add_buddy(jid=node.getFrom())
+
+        node_type = node.getType()
+        if node_type in ["error", "unavailable"]:
+            nick = node.getNick()
+            code = node.getStatusCode()
+            if nick is not None and code == u"303":
+                nick = nick.encode("utf-8")
+                chan_user.resource = nick
+                muc.rename_buddy(buddy=chan_user, old_nick=node.getFrom().getResource().encode("utf-8"))
+                return
+            else:
+                action='remove'
+
+        muc.update_nicklist(buddy=chan_user, action=action)
+
     def presence_handler(self, conn, node):
         self.print_debug_handler("presence", node)
         buddy = self.search_buddy_list(node.getFrom().getStripped().encode("utf-8"), by='jid')
+        if isinstance(buddy, MUC):
+            self.muc_presence(buddy, conn, node)
+            return
         if not buddy:
             buddy = self.add_buddy(jid=node.getFrom())
-        # TODO handle MUC presence
-        if isinstance(buddy, MUC):
-            return
         action='update'
         node_type = node.getType()
         if node_type in ["error", "unavailable"]:
@@ -1018,6 +1038,9 @@ class Chat:
                                              "jabber_buffer_close_cb", "")
         self.buffer_title = self.buddy.alias
         if self.buffer:
+            weechat.buffer_set(self.buffer, "nicklist", "1")
+            weechat.buffer_set(self.buffer, "nicklist_display_groups", "1")
+            weechat.buffer_set(self.buffer, "display", "auto")
             weechat.buffer_set(self.buffer, "title", self.buffer_title)
             weechat.buffer_set(self.buffer, "short_name", self.buddy.alias)
             weechat.buffer_set(self.buffer, "localvar_set_type", "private")
@@ -1096,8 +1119,15 @@ class MUC:
         self.domain = ''
         self.resource = ''
         self.alias = ''
+        self.buddies = []
         self.parse_jid()
         self.set_alias()
+
+    def add_buddy(self, jid=None):
+        buddy = Buddy(jid=jid, server=self)
+        buddy.resource = buddy.resource.encode("utf-8")
+        self.buddies.append(buddy)
+        return buddy
 
     def set_alias(self):
         """Set the buddy alias.
@@ -1135,7 +1165,125 @@ class MUC:
         self.bare_jid = self.jid.getStripped().encode("utf-8")
         self.username = self.jid.getNode()
         self.domain = self.jid.getDomain()
-        self.resource = self.jid.getResource()
+        self.resource = self.jid.getResource().encode("utf-8")
+        return
+
+    def display_buddies(self):
+        """ Display buddies. """
+        weechat.prnt(self.chat.buffer, "")
+        weechat.prnt(self.chat.buffer, "Buddies:")
+
+        len_max = { 'alias': 5, 'jid': 5 }
+        lines = []
+        for buddy in sorted(self.buddies, key=lambda x: str(x.jid)):
+            alias = ''
+            if buddy.alias != buddy.bare_jid:
+                alias = buddy.alias
+            lines.append( {
+                'jid': str(buddy.jid),
+                'alias': alias,
+                'status': buddy.away_string(),
+                })
+            if len(alias) > len_max['alias']:
+                len_max['alias'] = len(alias)
+            if len(str(buddy.jid)) > len_max['jid']:
+                len_max['jid'] = len(str(buddy.jid))
+        prnt_format = "  %s%-" + str(len_max['jid']) + "s %-" + str(len_max['alias']) + "s %s"
+        weechat.prnt(self.chat.buffer, prnt_format % ('', 'JID', 'Alias', 'Status'))
+        for line in lines:
+            weechat.prnt(self.chat.buffer, prnt_format % (weechat.color("chat_nick"),
+                                                    line['jid'],
+                                                    line['alias'],
+                                                    line['status'],
+                                                    ))
+
+    def search_buddy_list(self, name, by='jid'):
+        """ Search for a buddy by name.
+
+        Args:
+            name: string, the buddy name to search, eg the jid or alias
+            by: string, either 'alias' or 'jid', determines which Buddy
+                property to match on, default 'jid'
+
+        Notes:
+            If the 'by' parameter is set to 'jid', the search matches on all
+            Buddy object jid properties, followed by all bare_jid properties.
+            Once a match is found it is returned.
+
+            If the 'by' parameter is set to 'alias', the search matches on all
+            Buddy object alias properties.
+
+            Generally, set the 'by' parameter to 'jid' when the jid is provided
+            from a server, for example from a received message. Set 'by' to
+            'alias' when the jid is provided by the user.
+        """
+        if by == 'jid':
+            for buddy in self.buddies:
+                if buddy.jid == name:
+                    return buddy
+            for buddy in self.buddies:
+                if buddy.bare_jid == name:
+                    return buddy
+        else:
+            for buddy in self.buddies:
+                if buddy.alias == name:
+                    return buddy
+        return None
+
+    def rename_buddy(self, buddy=None, old_nick=None):
+        if not buddy:
+            return
+        ptr_nick_gui = weechat.nicklist_search_nick(self.chat.buffer, "", old_nick)
+        if ptr_nick_gui:
+            weechat.nicklist_remove_nick(self.chat.buffer, ptr_nick_gui)
+
+        nick_color = "bar_fg"
+        weechat.nicklist_add_nick(self.chat.buffer, "", buddy.resource,
+                                  nick_color, "", "", 1)
+        color = 'message_join'
+
+        msg = "%s%s%s%s is now known as %s" % \
+                       (weechat.prefix("action"),
+                        weechat.color("chat_nick"),
+                        old_nick,
+                        weechat.color("msg"),
+                        buddy.resource)
+        weechat.prnt(self.chat.buffer, msg)
+
+    def update_nicklist(self, buddy=None, action=None):
+        """Update buddy in nicklist
+            Args:
+                buddy: Buddy object instance
+                action: string, one of 'update' or 'remove'
+        """
+        if not buddy:
+            return
+        if not action in ['remove', 'update']:
+            return
+        ptr_nick_gui = weechat.nicklist_search_nick(self.chat.buffer, "", buddy.resource)
+        weechat.nicklist_remove_nick(self.chat.buffer, ptr_nick_gui)
+        msg = ''
+        prefix = ''
+        color = ''
+        if action == 'update':
+            nick_color = "bar_fg"
+            weechat.nicklist_add_nick(self.chat.buffer, "", buddy.resource,
+                                      nick_color, "", "", 1)
+            if not ptr_nick_gui:
+                msg = 'joined'
+                prefix = 'join'
+                color = 'message_join'
+        if action == 'remove':
+            msg = 'quit'
+            prefix = 'quit'
+            color = 'message_quit'
+        if msg:
+            weechat.prnt(self.chat.buffer, "%s%s%s%s has %s"
+                         % (weechat.prefix(prefix),
+                            weechat.color("chat_nick"),
+                            buddy.resource,
+                            jabber_config_color(color),
+                            msg))
         return
 
 class Buddy:
@@ -1519,6 +1667,9 @@ def jabber_cmd_room(data, buffer, args):
                 buddy = context["server"].add_muc(room, nickname)
             if not buddy.chat:
                 context["server"].add_chat(buddy)
+            weechat.buffer_set(buddy.chat.buffer, "display", "auto")
+            weechat.buffer_set(buddy.chat.buffer, "nicklist", "1")
+            weechat.buffer_set(buddy.chat.buffer, "nicklist_display_groups", "1")
             weechat.buffer_set(buddy.chat.buffer, "display", "auto")
     return weechat.WEECHAT_RC_OK
 
