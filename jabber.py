@@ -1160,6 +1160,7 @@ class MUC:
         self.domain = ''
         self.resource = ''
         self.alias = ''
+        self.away = False
         self.buddies = []
         self.parse_jid()
         self.set_alias()
