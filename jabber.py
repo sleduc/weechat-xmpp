@@ -1165,6 +1165,9 @@ class MUC:
         self.parse_jid()
         self.set_alias()
 
+    def away_string(self):
+        return ""
+
     def add_buddy(self, jid=None):
         buddy = Buddy(jid=jid, server=self)
         buddy.resource = buddy.resource.encode("utf-8")
