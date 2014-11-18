@@ -658,6 +658,9 @@ class Server:
         else:
             buddy = self.search_buddy_list(self.stringify_jid(jid), by='jid')
         if not jid or not body:
+            subject = node.getSubject()
+            if subject:
+                buddy.chat.set_title(subject)
             return
         if not buddy:
             buddy = self.add_buddy(jid=jid)
@@ -1121,6 +1124,11 @@ class Chat:
                                 "%s%s\t%s" % (weechat.color("chat_nick_self"),
                                                 self.server.buddy.alias,
                                                 message))
+
+    def set_title(self, title):
+        self.buffer_title = title
+        weechat.buffer_set(self.buffer, "title", self.buffer_title)
+
     def print_status(self, status):
         """ Print a status message in chat. """
         weechat.prnt(self.buffer, "%s%s has status %s" %
